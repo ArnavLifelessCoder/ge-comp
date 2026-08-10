@@ -1,0 +1,19 @@
+[project]
+name = "modelsentry"
+version = "0.1.0"
+description = "Pre-deployment scanner for steganographic malware hidden in AI model weights"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.23", "safetensors>=0.4", "scipy>=1.9"]
+
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+
+[project.scripts]
+modelsentry = "modelsentry.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["modelsentry*"]
