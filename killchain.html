@@ -1,0 +1,51 @@
+<!doctype html><html><head><meta charset="utf-8"><title>ModelSentry Kill Chain</title>
+<style>
+ body{margin:0;background:#1a1a19;color:#ffffff;font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+ .wrap{max-width:920px;margin:0 auto;padding:28px}
+ h1{font-size:23px;margin:0 0 4px} .sub{color:#c3c2b7;font-size:14px;margin-bottom:22px}
+ .step{background:#232322;border:1px solid #2f2f2d;border-radius:12px;padding:16px 18px;margin-bottom:16px;position:relative}
+ .step .tag{position:absolute;top:-11px;left:16px;font-size:11px;font-weight:700;padding:2px 10px;border-radius:10px}
+ .t1{background:#3987e5;color:#fff} .t2{background:#e5484d;color:#fff} .t3{background:#199e70;color:#fff}
+ .step h3{margin:6px 0 8px;font-size:15px}
+ .term{background:#000;border-radius:8px;padding:12px 14px;font-family:ui-monospace,Menlo,monospace;
+   font-size:12.5px;line-height:1.6;color:#c9d1d9;overflow-x:auto}
+ .cmd{color:#199e70} .bad{color:#e5484d;font-weight:700} .good{color:#199e70;font-weight:700}
+ .arrow{text-align:center;color:#7a7a72;font-size:20px;margin:-6px 0 8px}
+ .verdict{background:linear-gradient(90deg,rgba(25,158,112,.15),transparent);border-left:3px solid #199e70;
+   padding:12px 16px;border-radius:6px;margin-top:6px;font-size:14px;line-height:1.55}
+ .note{color:#7a7a72;font-size:11.5px;margin-top:14px}
+</style></head><body><div class="wrap">
+<h1>ModelSentry, the live kill chain</h1>
+<div class="sub">Proof the threat is real: a model that runs code the instant you load it, and how we stop it.</div>
+
+<div class="step"><span class="tag t1">STEP 1 · THE BAIT</span>
+ <h3>A normal-looking fine-tuned checkpoint</h3>
+ <div class="term">resnet_finetuned.pt&nbsp;&nbsp;<span style="color:#7a7a72"># looks like any PyTorch model</span><br>
+ <span style="color:#7a7a72">• accuracy unchanged &nbsp;• loads normally &nbsp;• antivirus sees nothing</span><br>
+ hidden: an inert payload steganographically buried in the weights of one tensor,<br>
+ plus a tiny loader stub in the pickle that reassembles and runs it on load.</div></div>
+<div class="arrow">▼</div>
+
+<div class="step"><span class="tag t2">STEP 2 · DETONATION</span>
+ <h3>The victim does the most normal thing in ML</h3>
+ <div class="term"><span class="cmd">$ python -c "import torch; torch.load('resnet_finetuned.pt')"</span><br><br>
+ <span class="bad">[!] DETONATED: hidden payload ran on torch.load()</span><br>
+ &nbsp;&nbsp;&gt;&gt;&gt; proof file written by the MODEL:<br>
+ &nbsp;&nbsp;&nbsp;&nbsp;"This model executed code when you loaded it.<br>
+ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;If this were real malware, your machine would now be compromised."</span><br>
+ <span style="color:#7a7a72">(inert demo: writes a local file only, no network, no damage)</span></div></div>
+<div class="arrow">▼</div>
+
+<div class="step"><span class="tag t3">STEP 3 · MODELSENTRY BLOCKS IT</span>
+ <h3>Scan the same file first, before it ever loads</h3>
+ <div class="term"><span class="cmd">$ modelsentry scan resnet_finetuned.pt</span><br><br>
+ &nbsp;risk <span class="bad">100/100</span> &nbsp; tier <span class="bad">E4</span> &nbsp; band likely-compromised<br>
+ &nbsp;[serialization/E4] container executes code on load: REDUCE invokes builtins.exec()<br>
+ &nbsp;<span class="bad">CI gate exit code 2 → build blocked</span><br><br>
+ <span class="cmd">$ modelsentry scan real_clean_model.safetensors</span><br>
+ &nbsp;risk <span class="good">0/100</span> &nbsp; tier none &nbsp; band clean &nbsp;<span class="good">✓ passes</span></div></div>
+
+<div class="verdict"><b>Why it lands:</b> the payload hides in the numbers and the extractor hides in the loader, each half looks harmless alone, together they are a working dropper that no weight-only or pickle-only
+scanner catches. ModelSentry sees both halves and stops it at the gate, while a genuinely clean model sails through.</div>
+<div class="note">Ethical PoC: the payload only writes a local text file. No network calls, no persistence, no destructive action.</div>
+</div></body></html>
