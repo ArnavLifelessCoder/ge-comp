@@ -15,3 +15,8 @@ bench_models/
 *.pth
 *.npz
 *.safetensors
+
+# generated benchmark data (rebuild with bench/build_models.py + bench/run_benchmark.py)
+data/
+results.json
+arena.json

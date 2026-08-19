@@ -46,6 +46,66 @@ def test_roundtrip_recovery():
         assert found, "failed to recover MZ header"
 
 
+def test_holdout_payload_detected_without_markers():
+    """The point of the whole detector: a payload format whose magic bytes and
+    strings appear NOWHERE in analyze.MAGICS / STRING_HINTS must still be found,
+    by the marker-agnostic structure scan alone. If this passes only because a
+    marker leaked into the payload, the benchmark is measuring string search."""
+    pl = payloads.make_payload("wasm", 2048)
+    assert not any(m in pl for m in analyze.MAGICS), "holdout payload leaked a known magic"
+    assert not any(s in pl for s in analyze.STRING_HINTS), "holdout payload leaked a known string"
+    with tempfile.TemporaryDirectory() as d:
+        c = os.path.join(d, "c.safetensors"); _toy_model(c)
+        inf = os.path.join(d, "inf.safetensors")
+        lsb.inject(c, inf, pl, x_bits=3)
+        r = scan(inf)
+        assert r.risk > 50, f"held-out payload scored {r.risk}"
+        assert r.tier == "E2", f"no marker was present, so the tier must be E2, got {r.tier}"
+
+
+def test_capacity_saturating_payload_detected():
+    """Evasion the window-vs-window null is blind to on its own: fill the ENTIRE
+    LSB capacity so every window is payload and none stands out. Only the
+    absolute uniform null catches this."""
+    with tempfile.TemporaryDirectory() as d:
+        c = os.path.join(d, "c.safetensors"); _toy_model(c)
+        inf = os.path.join(d, "inf.safetensors")
+        capacity = (256 * 128 + 64 * 256) // 8      # bytes available at x=1
+        lsb.inject(c, inf, payloads.make_payload("yaml_config", capacity), x_bits=1)
+        r = scan(inf)
+        assert r.risk > 50, f"capacity-saturating payload scored {r.risk}"
+
+
+def test_structure_scan_quiet_on_uniform_noise():
+    """Natural mantissa bits are ~uniform. The self-calibrated null must not
+    fire on them, or the windowed scan just manufactures false positives."""
+    rng = np.random.default_rng(0)
+    noise = rng.integers(0, 256, 65536, dtype=np.uint8).tobytes()
+    st = analyze.structure_scan(noise)
+    assert st is not None
+    assert st["struct_z"] < analyze.STRUCT_Z, f"fired on uniform noise: z={st['struct_z']}"
+
+
+def test_z_floor_rises_with_hypothesis_count():
+    """Taking a max over more candidates must raise the bar, or FPs scale with
+    model size."""
+    assert analyze.z_floor_for(1000) > analyze.z_floor_for(10) >= analyze.STRUCT_Z
+
+
+def test_encrypted_lsb_is_reported_as_missed_not_hidden():
+    """The honest residual. An encrypted LSB payload is NOT detectable by
+    recovery, and the tool must score it low rather than pretend otherwise --
+    this test exists so that a future 'improvement' that quietly starts flagging
+    uniform noise gets caught."""
+    with tempfile.TemporaryDirectory() as d:
+        c = os.path.join(d, "c.safetensors"); _toy_model(c)
+        inf = os.path.join(d, "inf.safetensors")
+        lsb.inject(c, inf, payloads.make_payload("encrypted_pe", 2048), x_bits=3)
+        r = scan(inf)
+        assert r.risk <= 50, f"encrypted payload scored {r.risk}; if this now works, " \
+                             "update the README claim -- do not just relax the test"
+
+
 def test_malicious_pickle_flagged():
     import pickle, os as _os
     with tempfile.TemporaryDirectory() as d:

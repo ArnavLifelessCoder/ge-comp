@@ -30,6 +30,13 @@ def detect(graph, top_k=6) -> list[Evidence]:
     groups = [[n] for n in names_by_size[:top_k]]
     groups.append(names_by_size)  # whole-model stored order
 
+    # Multiple-comparison budget: we take a max over every candidate below, so
+    # the per-candidate bar has to account for how many we try. Counted up front
+    # (16 bit-depths x 2 orders per group, plus one raw-carve per tensor) so the
+    # bar does not depend on iteration order.
+    n_candidates = len(names_by_size[:top_k]) + len(groups) * 16 * 2
+    z_floor = analyze.z_floor_for(n_candidates)
+
     best = None
     # Mode 1: raw-byte carving. For attacks that write payload bytes directly
     # into float storage (EvilModel neuron replacement), the magic/strings sit in
@@ -37,7 +44,8 @@ def detect(graph, top_k=6) -> list[Evidence]:
     for name in names_by_size[:top_k]:
         raw = arrays[name].tobytes()
         score, tier, detail = analyze.score_stream(raw[:65536],
-                                                   {"x_bits": "raw", "bit_order": "raw"})
+                                                   {"x_bits": "raw", "bit_order": "raw"},
+                                                   z_floor=z_floor)
         if score > 0 and (best is None or score > best[0]):
             detail = dict(detail); detail["mode"] = "raw-carve"
             detail["hexdump"] = _hexdump(raw[:128])
@@ -46,7 +54,7 @@ def detect(graph, top_k=6) -> list[Evidence]:
     # Mode 2: bit-plane reconstruction (LSB / value-mapping).
     for names in groups:
         for params, stream in reconstruct.candidates(arrays, names, x_max=16):
-            score, tier, detail = analyze.score_stream(stream, params)
+            score, tier, detail = analyze.score_stream(stream, params, z_floor=z_floor)
             if score <= 0:
                 continue
             if best is None or score > best[0]:
@@ -56,9 +64,23 @@ def detect(graph, top_k=6) -> list[Evidence]:
         return []
     score, tier, detail, names, params = best
     detail = dict(detail)
+    detail["n_candidates"] = n_candidates
     tgt = names[0] if len(names) == 1 else f"{len(names)} tensors (stored order)"
+    if detail.get("structured_window"):
+        struct_what = (f"a non-uniform, compressible region at byte offset "
+                       f"{detail['offset']} of the recovered stream "
+                       f"(z={detail['struct_z']} vs this stream's own noise, "
+                       f"bar {detail['struct_z_floor']})")
+    else:
+        struct_what = "structured data"
     what = detail.get("magic") or (", ".join(detail.get("strings", []))[:40]) \
-        or ("printable payload" if "printable_ratio" in detail else "structured data")
+        or ("printable payload" if "printable_ratio" in detail else struct_what)
+    # localize inside the tensor where we can: for raw carving the stream offset
+    # maps straight onto float32 elements.
+    start = end = None
+    if params["x_bits"] == "raw" and "offset" in detail:
+        start = detail["offset"] // 4
+        end = start + analyze.WINDOW // 4
     if params["x_bits"] == "raw":
         expl = (f"carved a payload directly from the raw bytes of {tgt}; "
                 f"recovered {what}")
@@ -66,8 +88,10 @@ def detect(graph, top_k=6) -> list[Evidence]:
     else:
         # re-harvest the winning stream so the report can show the recovered bytes
         from ..recovery import reconstruct as _rc
-        winning = _rc.harvest(arrays, params["x_bits"], names, params["bit_order"])[:256]
-        detail.setdefault("hexdump", _hexdump(winning[:128]))
+        full = _rc.harvest(arrays, params["x_bits"], names, params["bit_order"])
+        # show the region the evidence actually points at, not just the head
+        off = detail.get("offset", 0) if detail.get("structured_window") else 0
+        detail.setdefault("hexdump", _hexdump(full[off:off + 128]))
         expl = (f"reconstructed a hidden bitstream from {tgt} at "
                 f"x={params['x_bits']} bits/weight ({params['bit_order']}-first); "
                 f"recovered {what}")
@@ -78,7 +102,7 @@ def detect(graph, top_k=6) -> list[Evidence]:
         tier_hint=tier,
         explanation=expl,
         confidence=0.95,
-        location=Location(tensor=names[0], bit_planes=planes),
+        location=Location(tensor=names[0], start=start, end=end, bit_planes=planes),
         features=detail,
     )]
 

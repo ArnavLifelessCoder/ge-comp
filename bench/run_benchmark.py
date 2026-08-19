@@ -1,10 +1,20 @@
 """End-to-end benchmark: build ground truth, fit baseline, score, report AUC.
 
-Design guards from the plan:
+Design guards:
   * architecture-disjoint baseline: the baseline is fit on architectures that do
     NOT appear in the test set, so we never calibrate on what we grade.
-  * hard negatives: randomly-perturbed-but-benign models are included so we prove
-    the detector keys on payload structure, not merely "weights were modified".
+  * hard negatives: randomly-perturbed-but-benign models, so we prove the
+    detector keys on payload structure, not merely "weights were modified".
+  * HELD-OUT PAYLOAD MARKERS: the headline detection number is reported on
+    payload formats whose magic bytes and strings appear NOWHERE in the
+    detector's marker lists. The "seen-marker" track (PE/ELF/script/ZIP) is kept
+    but reported separately and explicitly labelled, because a red team that
+    plants the same constants the blue team greps for measures string search,
+    not detection.
+  * ENCRYPTED TRACK IN THE HEADLINE: an encrypted payload is uniform-random with
+    no markers. It is the residual for any static scanner, it is what a
+    competent attacker actually ships, and it is included in the overall AUC
+    rather than excluded from it.
 """
 from __future__ import annotations
 
@@ -18,6 +28,11 @@ from modelsentry.detectors import bitplane
 from modelsentry.core.scanner import scan
 from attacks import lsb, payloads, evilmodel, maleficnet
 from safetensors.numpy import load_file, save_file
+
+SEEN_KINDS = ["pe", "elf", "script", "zip"]          # markers the detector knows
+HOLDOUT_KINDS = payloads.HOLDOUT_KINDS               # markers it has never seen
+ENCRYPTED_KINDS = payloads.ENCRYPTED_KINDS           # no markers at all
+RED = 51                                             # CI-gate threshold
 
 
 def arch_of(path):
@@ -100,7 +115,7 @@ def main():
 
     # architecture-disjoint split: half the archs for baseline, half for test
     random.seed(7)
-    base_archs = set(archs[::2])       # e.g. mlp, cnn
+    base_archs = set(archs[::2])
     test_archs = set(a for a in archs if a not in base_archs)
     if not test_archs:                 # tiny corpora: fall back to model-disjoint
         base_archs = set(archs); test_archs = set(archs)
@@ -113,127 +128,118 @@ def main():
     baseline.save(os.path.join(work, "baseline.json"))
 
     labels, scores, rows = [], [], []
+    tracks: dict[str, list[float]] = {}
 
-    # negatives: clean test models
+    def record(path, fam, track, label):
+        r = scan(path, baseline)
+        labels.append(label); scores.append(r.risk)
+        rows.append((os.path.basename(path), fam, r.risk, r.tier))
+        if track:
+            tracks.setdefault(track, []).append(r.risk)
+        return r
+
+    # --- negatives -----------------------------------------------------------
     for p in test_clean:
-        r = scan(p, baseline)
-        labels.append(0); scores.append(r.risk)
-        rows.append((os.path.basename(p), "clean", r.risk, r.tier))
-
-    # hard negatives: perturbed-benign versions of test models
+        record(p, "clean", "neg_clean", 0)
     for i, p in enumerate(test_clean):
         hp = os.path.join(work, f"hardneg_{i}.safetensors")
         perturb_benign(p, hp, sigma_frac=0.02, seed=i)
-        r = scan(hp, baseline)
-        labels.append(0); scores.append(r.risk)
-        rows.append((os.path.basename(hp), "hardneg", r.risk, r.tier))
+        record(hp, "hardneg", "neg_hardneg", 0)
 
-    # positives: LSB-infected across bit depths & payload kinds.
-    # We report STRUCTURED payloads (pe/elf/script/zip -- the realistic threat,
-    # they carry headers/strings) separately from RANDOM/encrypted payloads,
-    # which are the honest hard residual for any static scanner.
+    # --- B1: X-LSB, three marker regimes ------------------------------------
     xset = [1, 3, 6, 12]
-    structured = ["pe", "elf", "script", "zip"]
-    per_family = {}
-    per_payload = {}
+    regimes = [("B1_seen", SEEN_KINDS), ("B1_holdout", HOLDOUT_KINDS),
+               ("B1_encrypted", ENCRYPTED_KINDS)]
+    by_depth: dict[str, list[float]] = {}
+    by_payload: dict[str, list[float]] = {}
     for p in test_clean:
         for x in xset:
-            for pk in structured:
-                pl = payloads.make_payload(pk, size=2048)
-                ip = os.path.join(work, f"inf_{os.path.basename(p)}_x{x}_{pk}.safetensors")
-                lsb.inject(p, ip, pl, x_bits=x)
-                r = scan(ip, baseline)
-                labels.append(1); scores.append(r.risk)
-                rows.append((os.path.basename(ip), f"lsb_x{x}_{pk}", r.risk, r.tier))
-                per_family.setdefault(f"x{x}", []).append(r.risk)
-                per_payload.setdefault(pk, []).append(r.risk)
-    # separate track: random/encrypted payload (reported, not in main AUC headline)
-    rand_labels, rand_scores = [], []
-    for p in test_clean:
-        for x in [1, 6]:
-            pl = payloads.make_payload("random", size=2048)
-            ip = os.path.join(work, f"inf_{os.path.basename(p)}_x{x}_random.safetensors")
-            lsb.inject(p, ip, pl, x_bits=x)
-            r = scan(ip, baseline)
-            rand_labels.append(1); rand_scores.append(r.risk)
-            per_payload.setdefault("random", []).append(r.risk)
+            for track, kinds in regimes:
+                for pk in kinds:
+                    pl = payloads.make_payload(pk, size=2048)
+                    ip = os.path.join(work, f"inf_{os.path.basename(p)}_x{x}_{pk}.safetensors")
+                    lsb.inject(p, ip, pl, x_bits=x)
+                    r = record(ip, f"lsb_x{x}_{pk}", track, 1)
+                    by_depth.setdefault(f"x{x}", []).append(r.risk)
+                    by_payload.setdefault(pk, []).append(r.risk)
 
-    # per-family label/score tracks for family-level AUC (each vs the clean negs)
-    neg_scores = [sc for l, sc in zip(labels, scores) if l == 0]
-    fam_tracks = {"B1_lsb": [s for s in scores[len(neg_scores):]]}  # filled properly below
-
-    # --- B3: EvilModel neuron replacement ---
-    b3_scores = []
+    # --- B3: EvilModel neuron replacement ------------------------------------
     for p in test_clean:
         for frac in (0.1, 0.25, 0.5):
-            for pk in ("pe", "random"):
+            for pk, track in (("pe", "B3_seen"), ("wasm", "B3_holdout"),
+                              ("encrypted_pe", "B3_encrypted")):
                 pl = payloads.make_payload(pk, size=2048)
                 ip = os.path.join(work, f"b3_{os.path.basename(p)}_{frac}_{pk}.safetensors")
                 evilmodel.inject(p, ip, pl, frac_neurons=frac)
-                r = scan(ip, baseline)
-                labels.append(1); scores.append(r.risk); b3_scores.append(r.risk)
-                rows.append((os.path.basename(ip), f"evilmodel_{frac}_{pk}", r.risk, r.tier))
+                # by_payload stays B1-only on purpose: mixing families into one
+                # per-payload mean hides which family did the detecting.
+                record(ip, f"evilmodel_{frac}_{pk}", track, 1)
 
-    # --- B4: MaleficNet spread-spectrum ---
-    b4_scores = []
+    # --- B4: MaleficNet spread-spectrum --------------------------------------
     for p in test_clean:
         for amp in (0.01, 0.03, 0.08):
             pl = payloads.make_payload("random", size=1024)
             ip = os.path.join(work, f"b4_{os.path.basename(p)}_{amp}.safetensors")
             maleficnet.inject(p, ip, pl, amplitude=amp)
-            r = scan(ip, baseline)
-            labels.append(1); scores.append(r.risk); b4_scores.append(r.risk)
-            rows.append((os.path.basename(ip), f"maleficnet_{amp}", r.risk, r.tier))
+            record(ip, f"maleficnet_{amp}", "B4", 1)
+
+    # --- reporting -----------------------------------------------------------
+    neg = [s for l, s in zip(labels, scores) if l == 0]
+
+    def fam_auc(pos):
+        return roc_auc([0] * len(neg) + [1] * len(pos), neg + list(pos))
+
+    def red_rate(pos):
+        return float(np.mean([1 if s >= RED else 0 for s in pos])) if pos else float("nan")
 
     auc = roc_auc(labels, scores)
     det, thr = detection_rate_at_fpr(labels, scores, 0.01)
 
     print("\n=== RESULTS ===")
     print(f"models scored: {len(labels)}  (pos={sum(labels)}, neg={len(labels)-sum(labels)})")
-    print(f"ROC AUC:               {auc:.3f}")
-    print(f"detection @1% FPR:     {det:.3f}  (risk threshold {thr:.0f})")
-    print("\nby embedding depth (mean risk of infected):")
+    print(f"ROC AUC (ALL positives, encrypted included): {auc:.3f}")
+    print(f"detection @1% FPR:                           {det:.3f}  (risk threshold {thr:.0f})")
+
+    print("\n=== HEADLINE: detection by marker regime ===")
+    print("  (holdout = payload formats the detector has never been told about;")
+    print("   encrypted = uniform-random, no markers -- the static-analysis residual)")
+    hdr = f"  {'track':<16}{'AUC':>7}{'red-rate':>11}{'mean risk':>11}{'n':>6}"
+    print(hdr); print("  " + "-" * (len(hdr) - 2))
+    for t in ["B1_seen", "B1_holdout", "B1_encrypted",
+              "B3_seen", "B3_holdout", "B3_encrypted", "B4"]:
+        v = tracks.get(t, [])
+        if not v:
+            continue
+        print(f"  {t:<16}{fam_auc(v):>7.3f}{red_rate(v):>11.2f}"
+              f"{np.mean(v):>11.1f}{len(v):>6}")
+
+    print("\nby embedding depth (mean risk, all B1 payload kinds):")
     for x in xset:
-        v = per_family.get(f"x{x}", [])
+        v = by_depth.get(f"x{x}", [])
         if v: print(f"   x={x:>2} bits:  mean risk {np.mean(v):5.1f}   n={len(v)}")
 
-    print("\nby payload kind (mean risk):")
-    for pk in ["pe","elf","script","zip","random"]:
-        v=per_payload.get(pk,[])
-        if v: print(f"   {pk:8s}: mean risk {np.mean(v):5.1f}  min {np.min(v):3.0f}  n={len(v)}")
+    print("\nby payload kind (mean risk, B1/X-LSB only):")
+    for pk in SEEN_KINDS + HOLDOUT_KINDS + ENCRYPTED_KINDS:
+        v = by_payload.get(pk, [])
+        if v:
+            mark = "seen" if pk in SEEN_KINDS else ("holdout" if pk in HOLDOUT_KINDS else "encrypted")
+            print(f"   {pk:14s} [{mark:9s}]: mean risk {np.mean(v):5.1f}  "
+                  f"min {np.min(v):3.0f}  n={len(v)}")
 
-    cleans = [s for l, s in zip(labels, scores) if l == 0]
-    clean_red = float(np.mean([1 if s > 50 else 0 for s in cleans]))
-    print(f"\nclean/hardneg risk: mean {np.mean(cleans):.1f}  max {np.max(cleans):.0f}")
-    print(f"clean RED-rate (risk>50, the CI-gate false-positive rate): {clean_red:.2f}")
-    # honest residual: random/encrypted payload detection via recovery
-    if rand_scores:
-        thr_red=51
-        rdet=np.mean([1 if s>=thr_red else 0 for s in rand_scores])
-        print(f"random/encrypted payload detection (risk>=51): {rdet:.2f}  "
-              f"mean risk {np.mean(rand_scores):.1f}  (expected-hard)")
+    clean_red = float(np.mean([1 if s >= RED else 0 for s in neg]))
+    print(f"\nclean/hardneg risk: mean {np.mean(neg):.1f}  max {np.max(neg):.0f}")
+    print(f"clean RED-rate (risk>={RED}, the CI-gate false-positive rate): {clean_red:.2f}")
+
     print("\nsample rows:")
-    for name, fam, risk, tier in rows[:6] + rows[-6:]:
-        print(f"   {fam:10s} risk={risk:3d} tier={tier:5s} {name[:48]}")
-
-    def fam_auc(pos):
-        L = [0]*len(neg_scores) + [1]*len(pos)
-        S = neg_scores + pos
-        return roc_auc(L, S)
-    def red_rate(pos, t=51):
-        return float(np.mean([1 if s >= t else 0 for s in pos])) if pos else float("nan")
-
-    print("\n=== BY ATTACK FAMILY (each vs clean+hardneg negatives) ===")
-    b1_struct = [sc for (nm, fam, sc, ti) in rows if fam.startswith("lsb_") and "random" not in nm]
-    print(f"  B1 LSB (structured):  AUC {fam_auc(b1_struct):.3f}  red-rate {red_rate(b1_struct):.2f}  n={len(b1_struct)}")
-    print(f"  B3 EvilModel:         AUC {fam_auc(b3_scores):.3f}  red-rate {red_rate(b3_scores):.2f}  n={len(b3_scores)}")
-    print(f"  B4 MaleficNet:        AUC {fam_auc(b4_scores):.3f}  red-rate {red_rate(b4_scores):.2f}  n={len(b4_scores)}  (hard case)")
-    for amp in (0.01,0.03,0.08):
-        v=[sc for (nm,fam,sc,ti) in rows if fam==f"maleficnet_{amp}"]
-        if v: print(f"       amp={amp}: mean risk {np.mean(v):.0f}")
+    for name, fam, risk, tier in rows[:4] + rows[-4:]:
+        print(f"   {fam:22s} risk={risk:3d} tier={tier:5s} {name[:42]}")
 
     with open(os.path.join(work, "results.json"), "w") as f:
-        json.dump({"auc": auc, "det_at_1pct_fpr": det,
+        json.dump({"auc_all": auc, "det_at_1pct_fpr": det,
+                   "tracks": {k: {"auc": fam_auc(v), "red_rate": red_rate(v),
+                                  "mean_risk": float(np.mean(v)), "n": len(v)}
+                              for k, v in tracks.items() if not k.startswith("neg_")},
+                   "clean_red_rate": clean_red,
                    "rows": rows}, f, indent=2)
     print(f"\nsaved -> {os.path.join(work,'results.json')}")
 
