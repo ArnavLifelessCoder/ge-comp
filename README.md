@@ -98,16 +98,19 @@ benign models as hard negatives.
 |---|---|---|---|---|---|
 | **B1 LSB, held-out markers** | **formats the detector was never told about** | **1.000** | **1.00** | 96.1 | 180 |
 | B1 LSB, seen markers | PE/ELF/script/ZIP - the detector knows these | 1.000 | 1.00 | 98.5 | 144 |
-| B1 LSB, encrypted | uniform-random, no markers | 0.403 | 0.00 | 7.8 | 72 |
+| B1 LSB, encrypted | uniform-random, no markers | 0.403 | 0.00 | 7.7 | 72 |
 | B3 EvilModel, seen | neuron replacement, known format | 1.000 | 1.00 | 100.0 | 27 |
 | B3 EvilModel, held-out | neuron replacement, unknown format | 1.000 | 1.00 | 92.3 | 27 |
 | B3 EvilModel, encrypted | neuron replacement, encrypted payload | 1.000 | 1.00 | 92.3 | 27 |
-| B4 MaleficNet | spread-spectrum | 0.381 | 0.00 | 8.0 | 27 |
+| B4 MaleficNet | spread-spectrum | 0.416 | 0.00 | 8.6 | 27 |
 
-    ROC AUC, all positives including encrypted:  0.915
+    ROC AUC, all positives including encrypted:  0.914
+    detection at 1% FPR:                         0.825
     clean + hard-negative risk:                  mean 7.3, max 24
     clean RED-rate (CI-gate false positives):    0.00
     malicious pickle:                            risk 100, tier E4
+
+Run seed `MODELSENTRY_SEED=1000`. Every payload is seeded, so these reproduce.
 
 Three things in that table are worth reading carefully:
 
@@ -130,8 +133,8 @@ Per-payload detail (X-LSB only, mean risk over 4 embedding depths):
     elf          98.0   seen        sqlite        97.3   holdout
     script       98.0   seen        pem           96.8   holdout
     zip          98.0   seen        yaml_config   95.2   holdout
-                                    packed        94.9   holdout
-    random        7.7   encrypted   encrypted_pe   7.9   encrypted
+                                    packed        94.8   holdout
+    random        7.7   encrypted   encrypted_pe   7.7   encrypted
 
 ## Evidence tiers
 
@@ -159,11 +162,17 @@ Stated here rather than discovered by a reviewer:
    is the container-side detector, not the weight-side one.
 2. **Spread-spectrum (B4, MaleficNet) is not detected.** The spectral features
    we compute do not separate it from clean models of an unseen architecture -
-   clean transformers and wide MLPs reach the same deviation the attack does. It
-   is therefore reported as informational context and never drives the score, so
-   it cannot create false positives. Its AUC sits near chance; the below-0.5
-   value is not an inverted signal, it is what an uninformative score does when
-   ties are broken arbitrarily.
+   clean transformers and wide MLPs reach the same deviation (z=4.4) the attack
+   does. It is therefore reported as informational context and never drives the
+   score, so it cannot create false positives.
+
+   The below-0.5 AUC is not an inverted signal. A MaleficNet-infected model
+   scores essentially whatever its clean carrier scored - the risk distributions
+   are the same set of values - so the AUC is a tie-dominated artifact of which
+   negatives happen to land where, not a measurement of anything. The number
+   that means something is the red-rate: **0.00 at every seed tested**. Across
+   5 seeds the AUC sits at 0.391 +/- 0.015 (range 0.381-0.422); reproduce with
+   `python bench/b4_variance.py`.
 3. **The corpus is small and offline.** 18 models, no pretrained weights, no
    fp16/int8 artifacts. The false-positive claim is only as strong as that
    corpus, and the transformer arch was added precisely because MLP-only
@@ -204,7 +213,14 @@ Exit code is 2 when risk is above 50, so it drops straight into CI as a gate.
 ## Benchmark
 
     python bench/build_models.py data/clean 3
-    python bench/run_benchmark.py
+    python bench/run_benchmark.py                 # detection tracks
+    python bench/run_arena.py                     # capacity-stealth frontier
+    python bench/b4_variance.py data 1000,2000,3000,4000,5000
+
+Every payload is seeded, so a run reproduces exactly; `MODELSENTRY_SEED` picks
+the run. The numbers above are `MODELSENTRY_SEED=1000`. This matters because the
+encrypted and B4 tracks are driven by random payload content, and quoting one
+unreproducible draw of those is how a benchmark flatters itself.
 
 ## Safety note
 

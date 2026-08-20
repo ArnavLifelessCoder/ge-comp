@@ -79,7 +79,7 @@ def main():
 
     rows = []
     for i, (fam, kw, pk, marker, carrier, base) in enumerate(attacks):
-        pl = payloads.make_payload(pk, size=2048)
+        pl = payloads.make_payload(pk, size=2048, seed=2000 + i)
         stego = os.path.join(work, f"{fam}_{base}_{pk}_{i}.safetensors")
         if fam == "B1":
             lsb.inject(carrier, stego, pl, **kw)

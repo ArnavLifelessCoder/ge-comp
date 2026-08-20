@@ -37,12 +37,18 @@ transformer-wide), architecture-disjoint split, perturbed-benign hard negatives.
     B3 EvilModel, seen            1.000     1.00      27
     B3 EvilModel, held-out        1.000     1.00      27
     B3 EvilModel, encrypted       1.000     1.00      27
-    B4 MaleficNet                 0.381     0.00      27   (not detected)
+    B4 MaleficNet                 0.416     0.00      27   (not detected)
 
-    ROC AUC, all positives incl. encrypted:  0.915
+    ROC AUC, all positives incl. encrypted:  0.914
+    detection at 1% FPR:                     0.825
     clean / hard-negative risk:              mean 7.3, max 24
     clean RED-rate (CI-gate FPR):            0.00
     malicious pickle:                        risk 100, tier E4
+
+Reproducible: every payload is seeded, the run above is `MODELSENTRY_SEED=1000`.
+The encrypted and B4 tracks are driven by random payload content, so before
+seeding these numbers were one unreproducible draw -- three consecutive runs of
+the same code gave overall AUC 0.919 / 0.915 / 0.918.
 
 The number that matters is the held-out track. Payload formats whose magic bytes
 and strings appear nowhere in the detector's lists (wasm, sqlite, pem, yaml,
@@ -60,12 +66,16 @@ cannot silently degrade into the seen track.
   The container-side answer still applies: the stub that decrypts has to be
   somewhere, and if it is in the model file the serialization detector reads it.
   If it is in the application code, the artifact alone cannot be judged.
-- **B4 MaleficNet is not detected** (AUC 0.381). The spectral features do not
-  separate it: clean models of an architecture absent from the baseline reach
-  z=4.4 on the same features, which is as large as the attack's deviation. So
-  spectral evidence is informational and never drives the score, and it cannot
-  create false positives. The below-0.5 AUC is not an inverted signal -- the
-  score is uninformative, so the ordering among near-ties is arbitrary.
+- **B4 MaleficNet is not detected** (red-rate 0.00 at every seed tested). The
+  spectral features do not separate it: clean models of an architecture absent
+  from the baseline reach z=4.4 on the same features, which is as large as the
+  attack's deviation. So spectral evidence is informational and never drives the
+  score, and it cannot create false positives.
+  The below-0.5 AUC (0.416 at seed 1000; 0.391 +/- 0.015 over 5 seeds, range
+  0.381-0.422, via `bench/b4_variance.py`) is not an inverted signal. An infected
+  model scores essentially what its clean carrier scored -- the risk value sets
+  are the same -- so the AUC is a tie-dominated artifact of where the negatives
+  land, not a measurement. Red-rate is the number to read here.
 - **Corpus is small and synthetic.** 18 models, trained offline on toy tasks, no
   pretrained weights, no fp16/bf16/int8 artifacts. The transformer architecture
   was added because calibrating only on dense MLPs made the false-positive
@@ -74,8 +84,9 @@ cannot silently degrade into the seen track.
 - **Fusion is calibrated and tier-gated, not learned.** No logistic regression
   on disjoint splits yet.
 - **Arena figures** in `arena_dashboard.html` are produced by
-  `bench/run_arena.py`; rerun it if you change detector thresholds, because the
-  dashboard text quotes its counts.
+  `bench/run_arena.py` (198 attacks, 165 caught, 0 in the danger corner, 33
+  stealthy-inert residual); rerun it if you change detector thresholds, because
+  the dashboard text quotes its counts.
 
 ## Not built yet
 

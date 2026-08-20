@@ -4,6 +4,66 @@ All notable changes to ModelSentry are documented here.
 
 ---
 
+## [unreleased] — 2026-08-20
+
+### Make the benchmark reproducible, refresh all figures
+
+`attacks.payloads.make_payload` accepted a `seed` argument and ignored it — the
+next line was `rng = os.urandom`. Every run therefore drew different random and
+encrypted payloads, and the figures published in the previous entry were one
+unreproducible draw: three consecutive runs of identical code gave overall AUC
+**0.919 / 0.915 / 0.918** and B4 AUC **0.453 / 0.381 / 0.422**. Anyone re-running
+the benchmark would not have matched the README.
+
+- **`attacks/payloads.py`**: `seed` is now honoured (`random.Random(seed).randbytes`).
+  Verified that the seeded stream is still statistically uniform — chi² 242
+  against a 255 ± 22.6 null — so the encrypted track remains a genuine hard case
+  and did not become accidentally detectable.
+- **`bench/run_benchmark.py`**: seeds vary per attack from a `MODELSENTRY_SEED`
+  base (default 1000). A single fixed seed would have given every model
+  byte-identical random payloads, collapsing the 72-sample encrypted track into
+  one sample repeated.
+- **`bench/run_arena.py`**: seeded per attack index.
+- **`bench/b4_variance.py`** (new): measures the B4 AUC across seeds, so the
+  "uninformative, not weak" claim is tested rather than asserted.
+- **README.md / STATUS.md**: all figures refreshed from the seeded run, and the
+  B4 explanation corrected (see below).
+
+#### Results (`MODELSENTRY_SEED=1000`, reproducible)
+
+| Track | ROC AUC | Red-rate | Mean risk | n |
+|---|---|---|---|---|
+| **B1 LSB, held-out markers** | **1.000** | **1.00** | **96.1** | **180** |
+| B1 LSB, seen markers | 1.000 | 1.00 | 98.5 | 144 |
+| B1 LSB, encrypted | 0.403 | 0.00 | 7.7 | 72 |
+| B3 EvilModel, seen | 1.000 | 1.00 | 100.0 | 27 |
+| B3 EvilModel, held-out | 1.000 | 1.00 | 92.3 | 27 |
+| B3 EvilModel, encrypted | 1.000 | 1.00 | 92.3 | 27 |
+| B4 MaleficNet | 0.416 | 0.00 | 8.6 | 27 |
+
+```
+ROC AUC, all positives including encrypted:  0.914
+detection at 1% FPR:                         0.825
+clean + hard-negative risk:                  mean 7.3, max 24
+clean RED-rate (CI-gate false positives):    0.00
+```
+
+Arena unchanged under seeding: 198 attacks, 165 caught, **0** in the danger
+corner, 33 stealthy-inert residual.
+
+#### Correction to the B4 explanation
+
+The previous entry described B4's sub-0.5 AUC as arbitrary tie-breaking on an
+uninformative score. The seed sweep shows it is tighter than "arbitrary" —
+0.391 ± 0.015 over 5 seeds — and the underlying reason is more specific: a
+MaleficNet-infected model scores essentially whatever its clean carrier scored
+(the two risk-value sets are the same), so the AUC measures where the negatives
+happen to land rather than any property of the attack. The stable number is the
+red-rate, 0.00 at every seed. The conclusion is unchanged: B4 is not detected,
+and spectral evidence stays out of the score so it cannot cause false positives.
+
+---
+
 ## [91d37d2] — 2026-08-19
 
 ### Kill detector circularity, add held-out/encrypted benchmark tracks
@@ -67,6 +127,10 @@ measure the right thing, and re-runs everything from scratch.
 | `test_evilmodel_encrypted_flagged` | EvilModel with encrypted payload is still caught (placement anomaly) |
 
 #### Results (post-saturation-fix benchmark run)
+
+> **Superseded.** These figures came from an unseeded run and do not reproduce;
+> see the entry above for the seeded numbers. The tracks that depend on random
+> payload content (B1 encrypted, B4) are the ones that moved.
 
 522 artifacts scored (504 attacks, 18 negatives).
 

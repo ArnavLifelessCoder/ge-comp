@@ -4,7 +4,7 @@ would (magic headers, high entropy, byte structure) WITHOUT being actual malware
 A PE stub here is a harmless DOS-header byte string, not a working executable.
 """
 from __future__ import annotations
-import os
+import random as _r
 import zlib
 import base64
 
@@ -40,14 +40,18 @@ def _xor_keystream(data: bytes, seed: int = 7) -> bytes:
     """Stand-in for an encrypted payload: a keystream XOR removes every marker
     and flattens the byte histogram, exactly like AES-CTR would. The dropper
     stub holds the key; the file itself looks like noise."""
-    import random as _r
     rnd = _r.Random(seed)
     ks = bytes(rnd.getrandbits(8) for _ in range(len(data)))
     return bytes(a ^ b for a, b in zip(data, ks))
 
 
 def make_payload(kind: str, size: int = 4096, seed: int = 0) -> bytes:
-    rng = os.urandom  # cryptographic randomness -> near-uniform, like encrypted malware
+    """`seed` is honoured: the benchmark has to be reproducible, or the numbers
+    in the README are one draw that nobody else can reproduce. The stream is
+    still near-uniform (a Mersenne Twister byte stream is indistinguishable from
+    os.urandom by every statistic this scanner computes -- that is the point of
+    the encrypted track), it is just deterministic given the seed."""
+    rng = _r.Random(seed).randbytes
     if kind == "random":
         return rng(size)
     if kind == "pe":

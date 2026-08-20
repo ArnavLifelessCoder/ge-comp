@@ -152,11 +152,17 @@ def main():
                ("B1_encrypted", ENCRYPTED_KINDS)]
     by_depth: dict[str, list[float]] = {}
     by_payload: dict[str, list[float]] = {}
+    # Payload randomness is seeded, and the seed VARIES per attack: a fixed seed
+    # would hand every model byte-identical random payloads, which quietly
+    # shrinks the encrypted track to one sample repeated. Deterministic by
+    # construction order, so `run_seed` reproduces a run exactly.
+    run_seed = int(os.environ.get("MODELSENTRY_SEED", "1000"))
+    payload_seed = iter(range(run_seed, run_seed + 100000))
     for p in test_clean:
         for x in xset:
             for track, kinds in regimes:
                 for pk in kinds:
-                    pl = payloads.make_payload(pk, size=2048)
+                    pl = payloads.make_payload(pk, size=2048, seed=next(payload_seed))
                     ip = os.path.join(work, f"inf_{os.path.basename(p)}_x{x}_{pk}.safetensors")
                     lsb.inject(p, ip, pl, x_bits=x)
                     r = record(ip, f"lsb_x{x}_{pk}", track, 1)
@@ -168,7 +174,7 @@ def main():
         for frac in (0.1, 0.25, 0.5):
             for pk, track in (("pe", "B3_seen"), ("wasm", "B3_holdout"),
                               ("encrypted_pe", "B3_encrypted")):
-                pl = payloads.make_payload(pk, size=2048)
+                pl = payloads.make_payload(pk, size=2048, seed=next(payload_seed))
                 ip = os.path.join(work, f"b3_{os.path.basename(p)}_{frac}_{pk}.safetensors")
                 evilmodel.inject(p, ip, pl, frac_neurons=frac)
                 # by_payload stays B1-only on purpose: mixing families into one
@@ -178,7 +184,7 @@ def main():
     # --- B4: MaleficNet spread-spectrum --------------------------------------
     for p in test_clean:
         for amp in (0.01, 0.03, 0.08):
-            pl = payloads.make_payload("random", size=1024)
+            pl = payloads.make_payload("random", size=1024, seed=next(payload_seed))
             ip = os.path.join(work, f"b4_{os.path.basename(p)}_{amp}.safetensors")
             maleficnet.inject(p, ip, pl, amplitude=amp)
             record(ip, f"maleficnet_{amp}", "B4", 1)
